@@ -1,6 +1,8 @@
+python-telegram-bot==20.8
 pandas
 numpy
-ta
 requests
-python-telegram-bot==20.7
+ta
+nest_asyncio
+
 
