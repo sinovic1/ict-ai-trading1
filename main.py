@@ -1,130 +1,101 @@
-import time
 import logging
-import requests
-import pandas as pd
-import numpy as np
-import ta
 import asyncio
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import threading
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 # === CONFIG ===
 TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
-ALLOWED_USER_ID = 7469299312
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]
-INTERVAL = "5min"
-CHECK_INTERVAL = 300  # 5 minutes
+OWNER_ID = 7469299312
 
-bot = Bot(token=TOKEN)
+# === LOGGING ===
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 
-def analyze_pair(df):
-    df = df.copy()
-    if df is None or len(df) < 50:
-        return None
+# === STRATEGIES PLACEHOLDER ===
+def check_rsi(pair): return True
+def check_macd(pair): return True
+def check_ema(pair): return True
+def check_bollinger(pair): return True
 
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-    macd = ta.trend.MACD(df['close'])
-    df['macd_diff'] = macd.macd_diff()
-    df['ema_20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
-    bb = ta.volatility.BollingerBands(df['close'])
-    df['upper_band'] = bb.bollinger_hband()
-    df['lower_band'] = bb.bollinger_lband()
+# === SIGNAL LOGIC ===
+def generate_signal(pair):
+    rsi = check_rsi(pair)
+    macd = check_macd(pair)
+    ema = check_ema(pair)
+    bb = check_bollinger(pair)
 
-    latest = df.iloc[-1]
+    signals = [rsi, macd, ema, bb]
+    count = sum(signals)
 
-    signals = []
-    if latest['rsi'] < 30:
-        signals.append("RSI")
-    if latest['macd_diff'] > 0:
-        signals.append("MACD")
-    if latest['close'] > latest['ema_20']:
-        signals.append("EMA")
-    if latest['close'] < latest['lower_band']:
-        signals.append("Bollinger Bands")
+    if count >= 2:
+        entry = 1.1000  # Dummy value
+        tp1 = entry + 0.0010
+        tp2 = entry + 0.0020
+        tp3 = entry + 0.0030
+        sl = entry - 0.0015
 
-    if len(signals) >= 2:
-        entry = latest['close']
-        return {
-            "entry": entry,
-            "tp1": round(entry * 1.002, 5),
-            "tp2": round(entry * 1.004, 5),
-            "tp3": round(entry * 1.006, 5),
-            "sl": round(entry * 0.996, 5),
-            "reasons": signals
-        }
+        return (
+            f"📈 *Signal for {pair}*\n\n"
+            f"Entry: `{entry}`\n"
+            f"Take Profits: `{tp1}` / `{tp2}` / `{tp3}`\n"
+            f"Stop Loss: `{sl}`\n\n"
+            f"Strategies triggered: {count}/4"
+        )
     return None
 
-def get_price_data(pair):
-    try:
-        url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={pair[:3]}&to_symbol={pair[3:]}&interval={INTERVAL}&apikey=demo"
-        r = requests.get(url)
-        data = r.json()
-        key = list(data.keys())[1]
-        df = pd.DataFrame(data[key]).T.astype(float)
-        df.columns = ["open", "high", "low", "close"]
-        df = df.sort_index()
-        return df
-    except Exception as e:
-        print(f"Error fetching {pair}: {e}")
-        return None
-
-async def send_signal(pair, analysis):
-    message = (
-        f"\U0001F4C8 *{pair}* Signal\n"
-        f"Entry: {analysis['entry']}\n"
-        f"TP1: {analysis['tp1']}\n"
-        f"TP2: {analysis['tp2']}\n"
-        f"TP3: {analysis['tp3']}\n"
-        f"SL: {analysis['sl']}\n"
-        f"\U0001F9E0 Reasons: {', '.join(analysis['reasons'])}"
-    )
-    await bot.send_message(chat_id=ALLOWED_USER_ID, text=message, parse_mode="Markdown")
-
-async def check_signals_loop():
-    while True:
-        try:
-            for pair in PAIRS:
-                df = get_price_data(pair)
-                if df is not None:
-                    analysis = analyze_pair(df)
-                    if analysis:
-                        await send_signal(pair, analysis)
-        except Exception as e:
-            await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"\u274C Bot Error: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
+# === BOT COMMANDS ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    await update.message.reply_text("🤖 Bot is running!")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ALLOWED_USER_ID:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="\u2705 Bot is running.")
+    if update.effective_user.id != OWNER_ID:
+        return
+    await update.message.reply_text("✅ Everything is working fine.")
 
+# === MONITOR LOOP ===
+async def signal_loop(app):
+    try:
+        pairs = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]
+        while True:
+            for pair in pairs:
+                signal = generate_signal(pair)
+                if signal:
+                    await app.bot.send_message(chat_id=OWNER_ID, text=signal, parse_mode="Markdown")
+            await asyncio.sleep(300)  # Check every 5 mins
+    except Exception as e:
+        await app.bot.send_message(chat_id=OWNER_ID, text=f"❌ Bot crashed: {e}")
+
+# === MAIN ===
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
 
-    # Start signal-check loop in background
-    loop_task = asyncio.create_task(check_signals_loop())
+    # Start signal loop
+    asyncio.create_task(signal_loop(app))
 
-    print("\u2705 Bot started.")
+    print("✅ Bot started.")
     await app.run_polling()
 
-    # Cancel loop task on shutdown
-    loop_task.cancel()
-    try:
-        await loop_task
-    except asyncio.CancelledError:
-        print("\u274C Loop task cancelled")
-
+# === RUN ON RAILWAY/REPLIT ===
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if str(e).startswith("asyncio.run() cannot be called from a running event loop"):
-            import nest_asyncio
-            nest_asyncio.apply()
-            asyncio.get_event_loop().run_until_complete(main())
-        else:
-            raise
+    import nest_asyncio
+    nest_asyncio.apply()
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
+
 
 
 
