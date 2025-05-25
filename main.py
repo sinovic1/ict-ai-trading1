@@ -4,8 +4,9 @@ import requests
 import pandas as pd
 import numpy as np
 import ta
+import asyncio
 from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import threading
 
 # === CONFIG ===
@@ -13,7 +14,7 @@ TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
 ALLOWED_USER_ID = 7469299312
 PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]
 INTERVAL = "5min"
-CHECK_INTERVAL = 300  # 5 minutes in seconds
+CHECK_INTERVAL = 300  # 5 minutes
 
 bot = Bot(token=TOKEN)
 
@@ -22,7 +23,6 @@ def analyze_pair(df):
     if df is None or len(df) < 50:
         return None
 
-    # Indicators
     df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
     macd = ta.trend.MACD(df['close'])
     df['macd_diff'] = macd.macd_diff()
@@ -69,7 +69,7 @@ def get_price_data(pair):
         print(f"Error fetching {pair}: {e}")
         return None
 
-def send_signal(pair, analysis):
+async def send_signal(pair, analysis):
     message = (
         f"📈 *{pair}* Signal\n"
         f"Entry: {analysis['entry']}\n"
@@ -79,9 +79,9 @@ def send_signal(pair, analysis):
         f"SL: {analysis['sl']}\n"
         f"🧠 Reasons: {', '.join(analysis['reasons'])}"
     )
-    bot.send_message(chat_id=ALLOWED_USER_ID, text=message, parse_mode="Markdown")
+    await bot.send_message(chat_id=ALLOWED_USER_ID, text=message, parse_mode="Markdown")
 
-def check_signals():
+async def check_signals_loop():
     while True:
         try:
             for pair in PAIRS:
@@ -89,24 +89,26 @@ def check_signals():
                 if df is not None:
                     analysis = analyze_pair(df)
                     if analysis:
-                        send_signal(pair, analysis)
+                        await send_signal(pair, analysis)
         except Exception as e:
-            bot.send_message(chat_id=ALLOWED_USER_ID, text=f"❌ Bot Error: {e}")
-        time.sleep(CHECK_INTERVAL)
+            await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"❌ Bot Error: {e}")
+        await asyncio.sleep(CHECK_INTERVAL)
 
-def status(update: Update, context: CallbackContext):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ALLOWED_USER_ID:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Bot is running.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Bot is running.")
 
-def main():
-    updater = Updater(token=TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("status", status))
-    updater.start_polling()
-    threading.Thread(target=check_signals, daemon=True).start()
-    updater.idle()
+async def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("status", status))
+
+    # Start signal-check loop in background
+    asyncio.create_task(check_signals_loop())
+
+    print("✅ Bot started.")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 
 
