@@ -3,3 +3,5 @@ pandas
 ta
 yfinance
 pydantic==2.5.3
+nest_asyncio
+
