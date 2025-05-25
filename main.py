@@ -71,13 +71,13 @@ def get_price_data(pair):
 
 async def send_signal(pair, analysis):
     message = (
-        f"📈 *{pair}* Signal\n"
+        f"\U0001F4C8 *{pair}* Signal\n"
         f"Entry: {analysis['entry']}\n"
         f"TP1: {analysis['tp1']}\n"
         f"TP2: {analysis['tp2']}\n"
         f"TP3: {analysis['tp3']}\n"
         f"SL: {analysis['sl']}\n"
-        f"🧠 Reasons: {', '.join(analysis['reasons'])}"
+        f"\U0001F9E0 Reasons: {', '.join(analysis['reasons'])}"
     )
     await bot.send_message(chat_id=ALLOWED_USER_ID, text=message, parse_mode="Markdown")
 
@@ -91,24 +91,40 @@ async def check_signals_loop():
                     if analysis:
                         await send_signal(pair, analysis)
         except Exception as e:
-            await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"❌ Bot Error: {e}")
+            await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"\u274C Bot Error: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ALLOWED_USER_ID:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Bot is running.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="\u2705 Bot is running.")
 
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("status", status))
 
     # Start signal-check loop in background
-    asyncio.create_task(check_signals_loop())
+    loop_task = asyncio.create_task(check_signals_loop())
 
-    print("✅ Bot started.")
+    print("\u2705 Bot started.")
     await app.run_polling()
 
+    # Cancel loop task on shutdown
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        print("\u274C Loop task cancelled")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if str(e).startswith("asyncio.run() cannot be called from a running event loop"):
+            import nest_asyncio
+            nest_asyncio.apply()
+            asyncio.get_event_loop().run_until_complete(main())
+        else:
+            raise
+
 
 
