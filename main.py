@@ -1,77 +1,112 @@
-import asyncio
-import nest_asyncio
+import time
 import logging
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters
-)
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from indicators import analyze_pair
-from config import (
-    TELEGRAM_TOKEN,
-    TELEGRAM_USER_ID,
-    FOREX_PAIRS
-)
+import requests
+import pandas as pd
+import numpy as np
+import ta
+from telegram import Bot, Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
+import threading
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# === CONFIG ===
+TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
+ALLOWED_USER_ID = 7469299312
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]
+INTERVAL = "5min"
+CHECK_INTERVAL = 300  # 5 minutes in seconds
 
-# Set up the scheduler
-scheduler = AsyncIOScheduler()
+bot = Bot(token=TOKEN)
 
-# Main bot commands
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != TELEGRAM_USER_ID:
-        return
-    await update.message.reply_text("👋 Hello Hassan! I'm your trading bot. Type /status to check if I'm running.")
+def analyze_pair(df):
+    df = df.copy()
+    if df is None or len(df) < 50:
+        return None
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != TELEGRAM_USER_ID:
-        return
-    await update.message.reply_text("✅ Everything is working fine.")
+    # Indicators
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    macd = ta.trend.MACD(df['close'])
+    df['macd_diff'] = macd.macd_diff()
+    df['ema_20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
+    bb = ta.volatility.BollingerBands(df['close'])
+    df['upper_band'] = bb.bollinger_hband()
+    df['lower_band'] = bb.bollinger_lband()
 
-# Signal checker
-async def check_signals(application):
-    from signal_generator import generate_signal
+    latest = df.iloc[-1]
 
-    for pair in FOREX_PAIRS:
-        try:
-            result = await generate_signal(pair)
-            if result:
-                await application.bot.send_message(chat_id=TELEGRAM_USER_ID, text=result)
-        except Exception as e:
-            logger.error(f"Error checking signals for {pair}: {e}")
+    signals = []
+    if latest['rsi'] < 30:
+        signals.append("RSI")
+    if latest['macd_diff'] > 0:
+        signals.append("MACD")
+    if latest['close'] > latest['ema_20']:
+        signals.append("EMA")
+    if latest['close'] < latest['lower_band']:
+        signals.append("Bollinger Bands")
 
-# Loop monitor
-async def loop_monitor(application):
+    if len(signals) >= 2:
+        entry = latest['close']
+        return {
+            "entry": entry,
+            "tp1": round(entry * 1.002, 5),
+            "tp2": round(entry * 1.004, 5),
+            "tp3": round(entry * 1.006, 5),
+            "sl": round(entry * 0.996, 5),
+            "reasons": signals
+        }
+    return None
+
+def get_price_data(pair):
     try:
-        await application.bot.send_message(chat_id=TELEGRAM_USER_ID, text="⚠️ Signal loop is not responding.")
+        url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={pair[:3]}&to_symbol={pair[3:]}&interval={INTERVAL}&apikey=demo"
+        r = requests.get(url)
+        data = r.json()
+        key = list(data.keys())[1]
+        df = pd.DataFrame(data[key]).T.astype(float)
+        df.columns = ["open", "high", "low", "close"]
+        df = df.sort_index()
+        return df
     except Exception as e:
-        logger.error(f"Failed to send loop warning: {e}")
+        print(f"Error fetching {pair}: {e}")
+        return None
 
-# Main function
-async def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+def send_signal(pair, analysis):
+    message = (
+        f"📈 *{pair}* Signal\n"
+        f"Entry: {analysis['entry']}\n"
+        f"TP1: {analysis['tp1']}\n"
+        f"TP2: {analysis['tp2']}\n"
+        f"TP3: {analysis['tp3']}\n"
+        f"SL: {analysis['sl']}\n"
+        f"🧠 Reasons: {', '.join(analysis['reasons'])}"
+    )
+    bot.send_message(chat_id=ALLOWED_USER_ID, text=message, parse_mode="Markdown")
 
-    # Commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
+def check_signals():
+    while True:
+        try:
+            for pair in PAIRS:
+                df = get_price_data(pair)
+                if df is not None:
+                    analysis = analyze_pair(df)
+                    if analysis:
+                        send_signal(pair, analysis)
+        except Exception as e:
+            bot.send_message(chat_id=ALLOWED_USER_ID, text=f"❌ Bot Error: {e}")
+        time.sleep(CHECK_INTERVAL)
 
-    # Scheduled tasks
-    scheduler.add_job(check_signals, "interval", seconds=300, args=[app])
-    scheduler.add_job(loop_monitor, "interval", minutes=15, args=[app])
-    scheduler.start()
+def status(update: Update, context: CallbackContext):
+    if update.effective_user.id == ALLOWED_USER_ID:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Bot is running.")
 
-    logger.info("✅ Bot started successfully.")
-    await app.run_polling()
+def main():
+    updater = Updater(token=TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("status", status))
+    updater.start_polling()
+    threading.Thread(target=check_signals, daemon=True).start()
+    updater.idle()
 
-# Fix event loop issues for platforms like Koyeb
-if __name__ == '__main__':
-    nest_asyncio.apply()
-    asyncio.run(main())
+if __name__ == "__main__":
+    main()
+
 

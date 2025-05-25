@@ -1,7 +1,6 @@
-python-telegram-bot[job-queue]
 pandas
+numpy
 ta
-yfinance
-pydantic==2.5.3
-nest_asyncio
+python-telegram-bot
+requests
 
