@@ -1,130 +1,152 @@
-import logging
 import asyncio
-import pandas as pd
+import logging
+import nest_asyncio
 import yfinance as yf
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import pandas as pd
 import numpy as np
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import datetime, timedelta
+import os
 
-TOKEN = "7134641176:AAHtLDFCIvlnXVQgX0CHWhbgFUfRyuhbmXU"
-OWNER_ID = 7469299312  # Your Telegram user ID
+# Telegram bot token and user ID (your ID only)
+BOT_TOKEN = "7134641176:AAHtLDFCIvlnXVQgX0CHWhbgFUfRyuhbmXU"
+OWNER_ID = 7469299312
+
+# Forex pairs to track
 PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X", "USDCAD=X"]
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+# Logger setup
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-def calculate_indicators(df):
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["RSI"] = compute_rsi(df["Close"])
-    df["MACD"] = df["Close"].ewm(span=12).mean() - df["Close"].ewm(span=26).mean()
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
-    df["Upper"], df["Lower"] = bollinger_bands(df["Close"])
-    return df
+# Check if the user is authorized
+def is_authorized(user_id: int) -> bool:
+    return user_id == OWNER_ID
 
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def bollinger_bands(series, period=20, std_dev=2):
-    sma = series.rolling(window=period).mean()
-    std = series.rolling(window=period).std()
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper, lower
-
-def check_signals(df):
-    signals = []
-    close = df["Close"].iloc[-1]
-    prev_close = df["Close"].iloc[-2]
+# Calculate indicators
+def calculate_indicators(df: pd.DataFrame) -> dict:
+    signals = {}
 
     # EMA
-    ema_signal = "buy" if close > df["EMA20"].iloc[-1] else "sell"
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    ema_signal = "buy" if df["EMA20"].iloc[-1] > df["EMA50"].iloc[-1] else "sell"
 
     # RSI
-    rsi = df["RSI"].iloc[-1]
-    rsi_signal = "buy" if rsi < 30 else "sell" if rsi > 70 else "neutral"
+    delta = df["Close"].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_value = rsi.iloc[-1]
+    rsi_signal = "buy" if rsi_value < 30 else "sell" if rsi_value > 70 else "neutral"
 
     # MACD
-    macd = df["MACD"].iloc[-1]
-    signal = df["Signal"].iloc[-1]
-    macd_signal = "buy" if macd > signal else "sell"
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=9, adjust=False).mean()
+    macd_signal = "buy" if macd.iloc[-1] > signal_line.iloc[-1] else "sell"
 
     # Bollinger Bands
-    bb_signal = "buy" if close < df["Lower"].iloc[-1] else "sell" if close > df["Upper"].iloc[-1] else "neutral"
+    sma = df["Close"].rolling(window=20).mean()
+    std = df["Close"].rolling(window=20).std()
+    upper_band = sma + 2 * std
+    lower_band = sma - 2 * std
+    price = df["Close"].iloc[-1]
+    bb_signal = "buy" if price < lower_band.iloc[-1] else "sell" if price > upper_band.iloc[-1] else "neutral"
 
-    signals.extend([ema_signal, rsi_signal, macd_signal, bb_signal])
+    # Count strong signals
+    signal_votes = [ema_signal, rsi_signal, macd_signal, bb_signal]
+    buy_votes = signal_votes.count("buy")
+    sell_votes = signal_votes.count("sell")
+
+    if buy_votes >= 2:
+        signal = "buy"
+    elif sell_votes >= 2:
+        signal = "sell"
+    else:
+        signal = None
+
+    if signal:
+        entry = df["Close"].iloc[-1]
+        if signal == "buy":
+            tp1 = entry + 0.0020
+            tp2 = entry + 0.0040
+            tp3 = entry + 0.0060
+            sl = entry - 0.0025
+        else:
+            tp1 = entry - 0.0020
+            tp2 = entry - 0.0040
+            tp3 = entry - 0.0060
+            sl = entry + 0.0025
+
+        signals = {
+            "pair": df.attrs["pair"],
+            "signal": signal,
+            "entry": round(entry, 5),
+            "tp1": round(tp1, 5),
+            "tp2": round(tp2, 5),
+            "tp3": round(tp3, 5),
+            "sl": round(sl, 5),
+        }
+
     return signals
 
-def decision(signals):
-    buys = signals.count("buy")
-    sells = signals.count("sell")
-    if buys >= 2:
-        return "buy"
-    elif sells >= 2:
-        return "sell"
-    return None
-
-def calculate_tp_sl(entry, direction):
-    tp1 = round(entry * (1.002 if direction == "buy" else 0.998), 5)
-    tp2 = round(entry * (1.004 if direction == "buy" else 0.996), 5)
-    tp3 = round(entry * (1.006 if direction == "buy" else 0.994), 5)
-    sl = round(entry * (0.996 if direction == "buy" else 1.004), 5)
-    return tp1, tp2, tp3, sl
-
-async def send_signal(context: ContextTypes.DEFAULT_TYPE, pair: str, signal: str, price: float):
-    tp1, tp2, tp3, sl = calculate_tp_sl(price, signal)
-    text = (
-        f"📊 <b>{pair.replace('=X', '')} Signal</b>\n"
-        f"📈 <b>Direction:</b> {signal.upper()}\n"
-        f"🎯 <b>Entry:</b> {price}\n"
-        f"✅ <b>TP1:</b> {tp1}\n"
-        f"✅ <b>TP2:</b> {tp2}\n"
-        f"✅ <b>TP3:</b> {tp3}\n"
-        f"❌ <b>SL:</b> {sl}"
-    )
-    await context.bot.send_message(chat_id=OWNER_ID, text=text, parse_mode="HTML")
-
-async def signal_loop(app: Application):
+# Signal loop that runs continuously
+async def signal_loop(app):
     while True:
         try:
             for pair in PAIRS:
-                df = yf.download(pair, interval="5m", period="1d")
-                if df.empty:
+                data = yf.download(pair, period="7d", interval="1h", auto_adjust=True)
+                if data.empty:
                     continue
-                df = calculate_indicators(df)
-                signals = check_signals(df)
-                final_signal = decision(signals)
-                price = round(df["Close"].iloc[-1], 5)
-
-                if final_signal:
-                    await send_signal(app, pair, final_signal, price)
-
-            await asyncio.sleep(300)  # Wait 5 minutes
+                data.attrs["pair"] = pair
+                result = calculate_indicators(data)
+                if result:
+                    message = (
+                        f"📈 *{result['pair']}* - *{result['signal'].upper()}*\n"
+                        f"Entry: `{result['entry']}`\n"
+                        f"Take Profit 1: `{result['tp1']}`\n"
+                        f"Take Profit 2: `{result['tp2']}`\n"
+                        f"Take Profit 3: `{result['tp3']}`\n"
+                        f"Stop Loss: `{result['sl']}`"
+                    )
+                    await app.bot.send_message(chat_id=OWNER_ID, text=message, parse_mode="Markdown")
         except Exception as e:
-            await app.bot.send_message(chat_id=OWNER_ID, text=f"❌ Bot crashed: {e}")
-            break  # Stop the loop to trigger restart
+            await app.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ Bot error: {e}")
+        await asyncio.sleep(3600)  # Check every 1 hour
 
+# /status command
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == OWNER_ID:
+    if is_authorized(update.effective_user.id):
         await update.message.reply_text("✅ Bot is running and checking signals.")
     else:
-        await update.message.reply_text("🚫 You're not authorized to use this bot.")
+        await update.message.reply_text("❌ Unauthorized user.")
 
+# Main async function
 async def main():
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("status", status))
 
     # Start the signal loop
     asyncio.create_task(signal_loop(app))
 
+    # Run the bot
     await app.run_polling()
 
+# Event loop fix for environments like Koyeb
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "event loop is already running" in str(e):
+            nest_asyncio.apply()
+            asyncio.get_event_loop().run_until_complete(main())
+        else:
+            raise
 
 
 
