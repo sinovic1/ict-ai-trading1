@@ -1,8 +1,7 @@
-python-telegram-bot==20.8
+python-telegram-bot==20.7
 pandas
+yfinance
 numpy
-requests
-ta
-nest_asyncio
+
 
 
